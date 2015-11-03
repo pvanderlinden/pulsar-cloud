@@ -1,5 +1,7 @@
 import os
 import mimetypes
+import asyncio
+import functools
 
 import botocore.session
 
@@ -15,20 +17,24 @@ class Botocore(object):
     '''
     def __init__(self, service_name, region_name=None,
                  endpoint_url=None, session=None, green_pool=None,
-                 green=True, **kwargs):
+                 green=True, loop=None, **kwargs):
         self._green_pool = green_pool
+        self._loop = loop or asyncio.get_event_loop()
         self.session = session or botocore.session.get_session()
         self.client = self.session.create_client(service_name,
                                                  region_name=region_name,
                                                  endpoint_url=endpoint_url,
                                                  **kwargs)
+
+        self._make_api_call = self.client._make_api_call
         if green:
             endpoint = self.client._endpoint
             for adapter in endpoint.http_session.adapters.values():
                 adapter.poolmanager = wrap_poolmanager(adapter.poolmanager)
 
-            self._make_api_call = self.client._make_api_call
-            self.client._make_api_call = self._call
+            self.client._make_api_call = self._green_call
+        else:
+            self.client._make_api_call = self._executor_call
 
     def __getattr__(self, operation):
         return getattr(self.client, operation)
@@ -90,12 +96,17 @@ class Botocore(object):
             resp['Bucket'] = bucket
         return resp
 
-    def _call(self, operation, kwargs):
+    def _green_call(self, operation, kwargs):
         if getcurrent().parent:
             return self._make_api_call(operation, kwargs)
         else:
             pool = self.green_pool()
             return pool.submit(self._make_api_call, operation, kwargs)
+
+    def _executor_call(self, operation, kwargs):
+        return self._loop.run_in_executor(None, functools.partial(
+            self._make_api_call, operation, kwargs
+        ))
 
     def _read_body(self, body, n):
         return

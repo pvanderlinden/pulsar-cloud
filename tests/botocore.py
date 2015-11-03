@@ -61,6 +61,7 @@ class BotocoreTest(unittest.TestCase):
     def setUpClass(cls):
         cls.green_pool = GreenPool()
         cls.ec2 = Botocore('ec2', 'us-east-1', green_pool=cls.green_pool)
+        cls.ec2_non_green = Botocore('ec2', 'us-east-1', green=False)
         cls.s3 = Botocore('s3', green_pool=cls.green_pool)
 
     def assert_status(self, response, code=200):
@@ -95,6 +96,10 @@ class BotocoreTest(unittest.TestCase):
     def test_list_buckets(self):
         buckets = yield from self.s3.list_buckets()
         self.assertTrue(buckets)
+
+    def test_non_green(self):
+        response = yield from self.ec2_non_green.describe_instances()
+        self.assertTrue(response)
 
     @green
     def test_get_object_chunks(self):
