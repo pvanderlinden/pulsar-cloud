@@ -2,6 +2,7 @@ import os
 import unittest
 import string
 import tempfile
+import asyncio
 
 from botocore.exceptions import ClientError
 
@@ -14,8 +15,8 @@ from cloud.pulsar_botocore import MULTI_PART_SIZE
 
 def green(f):
 
-    def _(self):
-        return self.green_pool.submit(f, self)
+    def _(self, *args, **kwargs):
+        return self.green_pool.submit(f, self, *args, **kwargs)
 
     return _
 
@@ -56,19 +57,26 @@ class RandomFile:
         return b''
 
 
-class BotocoreTest(unittest.TestCase):
+class GreenBotocoreTest(unittest.TestCase):
+
+    @classmethod
+    def config(cls):
+        cls.green_pool = GreenPool()
+        return {
+            'green_pool': cls.green_pool
+        }
 
     @classmethod
     def setUpClass(cls):
-        cls.green_pool = GreenPool()
-        cls.ec2 = Botocore('ec2', 'us-east-1', green_pool=cls.green_pool)
-        cls.ec2_non_green = Botocore('ec2', 'us-east-1', green=False)
-        cls.s3 = Botocore('s3', green_pool=cls.green_pool)
+        config = cls.config()
+        cls.ec2 = Botocore('ec2', 'us-east-1', **config)
+        cls.s3 = Botocore('s3', **config)
 
     def assert_status(self, response, code=200):
         meta = response['ResponseMetadata']
         self.assertEqual(meta['HTTPStatusCode'], code)
 
+    @green
     def clean_up(self, r):
         response = self.s3.head_object(Bucket=BUCKET,
                                        Key=r.key)
@@ -82,7 +90,7 @@ class BotocoreTest(unittest.TestCase):
                           Bucket=BUCKET,
                           Key=r.key)
 
-    # TESTS
+    # # TESTS
     def test_describe_instances(self):
         response = yield from self.ec2.describe_instances()
         self.assertTrue(response)
@@ -97,10 +105,6 @@ class BotocoreTest(unittest.TestCase):
     def test_list_buckets(self):
         buckets = yield from self.s3.list_buckets()
         self.assertTrue(buckets)
-
-    def test_non_green(self):
-        response = yield from self.ec2_non_green.describe_instances()
-        self.assertTrue(response)
 
     @green
     def test_get_object_chunks(self):
@@ -154,3 +158,13 @@ class BotocoreTest(unittest.TestCase):
                                            r.filename)
             self.assert_status(response)
             self.clean_up(r)
+#
+#
+# class AsyncBotocoreTest(GreenBotocoreTest):
+#
+#     @classmethod
+#     def config(cls):
+#         return {
+#             'green': False,
+#             'loop': asyncio.get_event_loop()
+#         }

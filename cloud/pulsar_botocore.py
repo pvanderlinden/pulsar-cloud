@@ -12,6 +12,14 @@ from .sock import wrap_poolmanager, StreamingBodyWsgiIterator
 MULTI_PART_SIZE = 2**23
 
 
+def nonblocking(func, pass_wrapper=False):
+    def _nonblocking(wrapper, *args, **kwargs):
+        # print('***', wrapper)
+        if pass_wrapper:
+            args = (wrapper,) + args
+        return wrapper._nonblocking(func, *args, **kwargs)
+    return functools.wraps(func)(_nonblocking)
+
 class Botocore(object):
     '''An asynchronous wrapper for botocore
     '''
@@ -19,36 +27,43 @@ class Botocore(object):
                  endpoint_url=None, session=None, green_pool=None,
                  green=True, loop=None, **kwargs):
         self._green_pool = green_pool
-        self._loop = loop or asyncio.get_event_loop()
         self.session = session or botocore.session.get_session()
         self.client = self.session.create_client(service_name,
                                                  region_name=region_name,
                                                  endpoint_url=endpoint_url,
                                                  **kwargs)
 
-        self._make_api_call = self.client._make_api_call
+        # self._make_api_call = self.client._make_api_call
         if green:
-            endpoint = self.client._endpoint
-            for adapter in endpoint.http_session.adapters.values():
-                adapter.poolmanager = wrap_poolmanager(adapter.poolmanager)
+            # endpoint = self.client._endpoint
+            # for adapter in endpoint.http_session.adapters.values():
+            #     adapter.poolmanager = wrap_poolmanager(adapter.poolmanager)
 
-            self.client._make_api_call = self._green_call
+            # self.client._make_api_call = self._green_call
+            self._nonblocking = self._green_call
         else:
-            self.client._make_api_call = self._executor_call
+            self._loop = loop or asyncio.get_event_loop()
+            # self.client._make_api_call = self._executor_call
+            self._nonblocking = self._executor_call
 
-    def __getattr__(self, operation):
-        return getattr(self.client, operation)
+
+    def __getattr__(self, name):
+        attr = getattr(self.client, name)
+        if callable(attr):
+            attr = functools.partial(nonblocking(attr), self)
+        return attr
 
     def green_pool(self):
         if not self._green_pool:
             self._green_pool = GreenPool()
         return self._green_pool
 
-    def wsgi_stream_body(self, body, n=-1):
-        '''WSGI iterator of a botocore StreamingBody
-        '''
-        return StreamingBodyWsgiIterator(body, self.green_pool(), n)
+    # def wsgi_stream_body(self, body, n=-1):
+    #     '''WSGI iterator of a botocore StreamingBody
+    #     '''
+    #     return StreamingBodyWsgiIterator(body, self.green_pool(), n)
 
+    @functools.partial(nonblocking, pass_wrapper=True)
     def upload_file(self, bucket, file, uploadpath=None, key=None,
                     ContentType=None, **kw):
         '''Upload a file to S3 possibly using the multi-part uploader
@@ -86,33 +101,44 @@ class Botocore(object):
         elif is_file:
             with open(file, 'rb') as fp:
                 params['Body'] = fp.read()
-            resp = self.put_object(**params)
+            resp = self.client.put_object(**params)
         else:
             params['Body'] = file
-            resp = self.put_object(**params)
+            resp = self.client.put_object(**params)
         if 'Key' not in resp:
             resp['Key'] = key
         if 'Bucket' not in resp:
             resp['Bucket'] = bucket
         return resp
 
-    def _green_call(self, operation, kwargs):
-        if getcurrent().parent:
-            return self._make_api_call(operation, kwargs)
-        else:
-            pool = self.green_pool()
-            return pool.submit(self._make_api_call, operation, kwargs)
+    def _green_call(self, func, *args, **kwargs):
+        pool = self.green_pool()
+        return pool.submit(func, *args, **kwargs)
 
-    def _executor_call(self, operation, kwargs):
-        return self._loop.run_in_executor(None, functools.partial(
-            self._make_api_call, operation, kwargs
-        ))
+    # def _green_call(self, func, *args, **kwargs):
+    #     if getcurrent().parent:
+    #         return func(*args, **kwargs)
+    #     else:
+    #         pool = self.green_pool()
+    #         return pool.submit(func, *args, **kwargs)
 
-    def _read_body(self, body, n):
-        return
+    # def _green_call(self, operation, kwargs):
+    #     if getcurrent().parent:
+    #         return self._make_api_call(operation, kwargs)
+    #     else:
+    #         pool = self.green_pool()
+    #         return pool.submit(self._make_api_call, operation, kwargs)
+    #
+    # def _executor_call(self, operation, kwargs):
+    #     return self._loop.run_in_executor(None, functools.partial(
+    #         self._make_api_call, operation, kwargs
+    #     ))
+
+    # def _read_body(self, body, n):
+    #     return
 
     def _multipart(self, filename, params):
-        response = self.create_multipart_upload(**params)
+        response = self.client.create_multipart_upload(**params)
         bucket = params['Bucket']
         key = params['Key']
         uid = response['UploadId']
@@ -131,13 +157,13 @@ class Botocore(object):
                     part = self.upload_part(**params)
                     parts.append(dict(ETag=part['ETag'], PartNumber=num))
         except:
-            self.abort_multipart_upload(Bucket=bucket, Key=key, UploadId=uid)
+            self.client.abort_multipart_upload(Bucket=bucket, Key=key, UploadId=uid)
             raise
         else:
             if parts:
                 all = dict(Parts=parts)
-                return self.complete_multipart_upload(
+                return self.client.complete_multipart_upload(
                     Bucket=bucket, UploadId=uid, Key=key, MultipartUpload=all)
             else:
-                self.abort_multipart_upload(Bucket=bucket, Key=key,
+                self.client.abort_multipart_upload(Bucket=bucket, Key=key,
                                             UploadId=uid)
