@@ -20,6 +20,7 @@ def nonblocking(func, pass_wrapper=False):
         return wrapper._nonblocking(func, *args, **kwargs)
     return functools.wraps(func)(_nonblocking)
 
+
 class Botocore(object):
     '''An asynchronous wrapper for botocore
     '''
@@ -112,15 +113,16 @@ class Botocore(object):
         return resp
 
     def _green_call(self, func, *args, **kwargs):
-        pool = self.green_pool()
-        return pool.submit(func, *args, **kwargs)
+        if getcurrent().parent:
+            return func(*args, **kwargs)
+        else:
+            pool = self.green_pool()
+            return pool.submit(func, *args, **kwargs)
 
-    # def _green_call(self, func, *args, **kwargs):
-    #     if getcurrent().parent:
-    #         return func(*args, **kwargs)
-    #     else:
-    #         pool = self.green_pool()
-    #         return pool.submit(func, *args, **kwargs)
+    def _executor_call(self, func, *args, **kwargs):
+        return self._loop.run_in_executor(None, functools.partial(
+            func, *args, **kwargs
+        ))
 
     # def _green_call(self, operation, kwargs):
     #     if getcurrent().parent:
@@ -154,7 +156,7 @@ class Botocore(object):
                     num = len(parts) + 1
                     params['Body'] = body
                     params['PartNumber'] = num
-                    part = self.upload_part(**params)
+                    part = self.client.upload_part(**params)
                     parts.append(dict(ETag=part['ETag'], PartNumber=num))
         except:
             self.client.abort_multipart_upload(Bucket=bucket, Key=key, UploadId=uid)

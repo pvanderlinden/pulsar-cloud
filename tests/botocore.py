@@ -76,19 +76,17 @@ class GreenBotocoreTest(unittest.TestCase):
         meta = response['ResponseMetadata']
         self.assertEqual(meta['HTTPStatusCode'], code)
 
-    @green
     def clean_up(self, r):
-        response = self.s3.head_object(Bucket=BUCKET,
+        response = yield from self.s3.head_object(Bucket=BUCKET,
                                        Key=r.key)
         self.assert_status(response)
         self.assertEqual(response['ContentLength'], r.size)
         # Delete
-        response = self.s3.delete_object(Bucket=BUCKET,
+        response = yield from self.s3.delete_object(Bucket=BUCKET,
                                          Key=r.key)
         self.assert_status(response, 204)
-        self.assertRaises(ClientError, self.s3.get_object,
-                          Bucket=BUCKET,
-                          Key=r.key)
+        with self.assertRaises(ClientError):
+            yield from self.s3.get_object(Bucket=BUCKET, Key=r.key)
 
     # # TESTS
     def test_describe_instances(self):
@@ -106,9 +104,8 @@ class GreenBotocoreTest(unittest.TestCase):
         buckets = yield from self.s3.list_buckets()
         self.assertTrue(buckets)
 
-    @green
     def test_get_object_chunks(self):
-        response = self.s3.get_object(Bucket=BUCKET,
+        response = yield from self.s3.get_object(Bucket=BUCKET,
                                       Key='requirements.txt')
         self.assert_status(response)
         data = b''
@@ -119,52 +116,61 @@ class GreenBotocoreTest(unittest.TestCase):
             data += text
         self.assertTrue(data)
 
-    @green
     def test_upload_text(self):
         with open(__file__, 'r') as f:
             body = f.read()
             key = '%s.py' % random_string(characters=string.ascii_letters)
-            response = self.s3.put_object(Bucket=BUCKET,
+            response = yield from self.s3.put_object(Bucket=BUCKET,
                                           Body=body,
                                           ContentType='text/plain',
                                           Key=key)
             self.assert_status(response)
         #
         # Read object
-        response = self.s3.get_object(Bucket=BUCKET,
+        response = yield from self.s3.get_object(Bucket=BUCKET,
                                       Key=key)
         self.assert_status(response)
         self.assertEqual(response['ContentType'], 'text/plain')
         #
         # Delete object
-        response = self.s3.delete_object(Bucket=BUCKET,
+        response = yield from self.s3.delete_object(Bucket=BUCKET,
                                          Key=key)
         self.assert_status(response, 204)
-        self.assertRaises(ClientError, self.s3.get_object,
+        with self.assertRaises(ClientError):
+            yield from self.s3.get_object(
                           Bucket=BUCKET, Key=key)
 
-    @green
     def test_upload_binary(self):
         with RandomFile(2**12) as r:
-            response = self.s3.upload_file(BUCKET,
+            response = yield from self.s3.upload_file(BUCKET,
                                            r.filename)
             self.assert_status(response)
-            self.clean_up(r)
+            yield from self.clean_up(r)
 
-    @green
     def test_upload_binary_large(self):
         with RandomFile(int(1.5*MULTI_PART_SIZE)) as r:
-            response = self.s3.upload_file(BUCKET,
+            response = yield from self.s3.upload_file(BUCKET,
                                            r.filename)
             self.assert_status(response)
-            self.clean_up(r)
-#
-#
-# class AsyncBotocoreTest(GreenBotocoreTest):
-#
-#     @classmethod
-#     def config(cls):
-#         return {
-#             'green': False,
-#             'loop': asyncio.get_event_loop()
-#         }
+            yield from self.clean_up(r)
+
+
+class TestsInGreen(type):
+    def __new__(cls, name, bases, attrs):
+        for key, value in attrs.items():
+            if callable(value) and key.startswith('test_'):
+                attrs[key] = green(value)
+        return super().__new__(cls, name, bases, attrs)
+
+class GreenInGreenBotocoreTest(GreenBotocoreTest, metaclass=TestsInGreen):
+    pass
+
+
+class AsyncBotocoreTest(GreenBotocoreTest):
+
+    @classmethod
+    def config(cls):
+        return {
+            'green': False,
+            'loop': asyncio.get_event_loop()
+        }
